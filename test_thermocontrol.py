@@ -84,6 +84,14 @@ class ThermoControlTests(unittest.TestCase):
         _, value = self.repository.latest_measurement()
         self.assertAlmostEqual(value, 22.6)
 
+    def test_alert_is_created_only_on_new_violation(self) -> None:
+        self.repository.set_limits(self.user_id, 21.0, 22.3)
+        for second in range(4):
+            self.application.acquire_at(second, self.base + timedelta(seconds=second))
+        self.assertEqual(len(self.application.last_alerts), 1)
+        self.application.acquire_at(4, self.base + timedelta(seconds=4))
+        self.assertEqual(self.application.last_alerts, [])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

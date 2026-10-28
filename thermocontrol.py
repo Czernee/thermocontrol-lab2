@@ -56,6 +56,15 @@ class ProcessedSample:
     buffer_size: int
 
 
+@dataclass(frozen=True)
+class AlertEvent:
+    user_id: int
+    sensor_id: int
+    value_c: float
+    lower_c: float
+    upper_c: float
+
+
 class TemperatureSource:
     """Deterministic virtual temperature sensor from Laboratory work 1."""
 
@@ -470,6 +479,16 @@ class Repository:
         if cursor.rowcount != 1:
             raise PermissionError("No access to the sensor")
 
+    def active_subscriptions(self, sensor_id: int = 1) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """
+            SELECT user_id, sensor_id, lower_c, upper_c
+            FROM Subscription
+            WHERE sensor_id = ? AND enabled = 1
+            """,
+            (sensor_id,),
+        ).fetchall()
+
 
 class ThermoControl:
     """Application service used by any messenger or console adapter."""
@@ -485,6 +504,8 @@ class ThermoControl:
         self.source = source or TemperatureSource()
         self.processor = processor or SignalProcessor()
         self.sensor_id = sensor_id
+        self.last_alerts: list[AlertEvent] = []
+        self._violation_flags: dict[tuple[int, int], bool] = {}
 
     def acquire_at(
         self, t_seconds: float, measured_at_utc: datetime | None = None
@@ -497,7 +518,27 @@ class ThermoControl:
         self.repository.save_measurement(
             self.sensor_id, processed.measured_at_utc, processed.filtered_c
         )
+        self.last_alerts = self._new_alerts(processed.filtered_c)
         return processed
+
+    def _new_alerts(self, value_c: float) -> list[AlertEvent]:
+        events: list[AlertEvent] = []
+        for row in self.repository.active_subscriptions(self.sensor_id):
+            key = (int(row["user_id"]), int(row["sensor_id"]))
+            violation = value_c < row["lower_c"] or value_c > row["upper_c"]
+            was_violation = self._violation_flags.get(key, False)
+            if violation and not was_violation:
+                events.append(
+                    AlertEvent(
+                        user_id=key[0],
+                        sensor_id=key[1],
+                        value_c=value_c,
+                        lower_c=float(row["lower_c"]),
+                        upper_c=float(row["upper_c"]),
+                    )
+                )
+            self._violation_flags[key] = violation
+        return events
 
     def login(self, channel_user_id: str, login: str, password: str) -> str:
         session = self.repository.authenticate(login, password, channel_user_id)
