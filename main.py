@@ -31,11 +31,10 @@ def run_demo() -> None:
     with tempfile.TemporaryDirectory(prefix="thermocontrol-demo-") as directory:
         root = Path(directory)
         key = load_or_create_key(root / "demo.key")
-        # A reduced work factor keeps the demonstration quick. Production uses 600000.
         repository = Repository(
             root / "demo.sqlite3",
             MeasurementCipher(key),
-            PasswordHasher(iterations=20_000),
+            PasswordHasher(),
         )
         repository.initialize()
         repository.provision_user("student", "Lab2-demo!")
