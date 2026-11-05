@@ -90,12 +90,27 @@ def interactive(db_path: Path, key_path: Path) -> None:
 def provision(db_path: Path, key_path: Path, login: str) -> None:
     repository, _ = build_application(db_path, key_path)
     try:
-        password = getpass.getpass("Новый пароль (минимум 8 символов)> ")
-        confirmation = getpass.getpass("Повторите пароль> ")
-        if password != confirmation:
-            raise SystemExit("Пароли не совпадают.")
+        password = prompt_new_password()
         user_id = repository.provision_user(login, password)
         print(f"Создан пользователь {login!r}, внутренний user_id={user_id}.")
+    finally:
+        repository.close()
+
+
+def prompt_new_password() -> str:
+    password = getpass.getpass("Новый пароль (минимум 8 символов)> ")
+    confirmation = getpass.getpass("Повторите пароль> ")
+    if password != confirmation:
+        raise SystemExit("Пароли не совпадают.")
+    return password
+
+
+def reset_password(db_path: Path, key_path: Path, login: str) -> None:
+    repository, _ = build_application(db_path, key_path)
+    try:
+        if not repository.set_password(login, prompt_new_password()):
+            raise SystemExit(f"Пользователь {login!r} не найден.")
+        print(f"Пароль пользователя {login!r} изменен; прежние сеансы завершены.")
     finally:
         repository.close()
 
@@ -105,8 +120,23 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="запустить демонстрацию")
     parser.add_argument("--bot", action="store_true", help="запустить шлюз сообщений")
     parser.add_argument("--create-user", metavar="LOGIN", help="создать учетную запись")
-    parser.add_argument("--db", type=Path, default=Path("thermocontrol.sqlite3"))
-    parser.add_argument("--key", type=Path, default=Path("thermocontrol.key"))
+    parser.add_argument("--set-password", metavar="LOGIN", help="изменить пароль")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=Path("data/thermocontrol.sqlite3"),
+    )
+    parser.add_argument(
+        "--key",
+        type=Path,
+        default=Path("data/thermocontrol.key"),
+    )
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=Path("secrets/bot_token.txt"),
+        help="файл с токеном шлюза сообщений",
+    )
     arguments = parser.parse_args()
 
     if arguments.demo:
@@ -114,9 +144,11 @@ def main() -> None:
     elif arguments.bot:
         from bot_gateway import run_bot
 
-        run_bot(arguments.db, arguments.key)
+        run_bot(arguments.db, arguments.key, arguments.token_file)
     elif arguments.create_user:
         provision(arguments.db, arguments.key, arguments.create_user)
+    elif arguments.set_password:
+        reset_password(arguments.db, arguments.key, arguments.set_password)
     else:
         interactive(arguments.db, arguments.key)
 

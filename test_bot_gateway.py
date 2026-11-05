@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot_gateway import BotApiError, BotGateway
+from bot_gateway import BotApiError, BotGateway, load_bot_token
 from thermocontrol import MeasurementCipher, PasswordHasher, Repository, ThermoControl
 
 
@@ -45,9 +45,9 @@ def update(
 class BotGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="thermocontrol-bot-test-")
-        root = Path(self.temp.name)
+        self.root = Path(self.temp.name)
         self.repository = Repository(
-            root / "test.sqlite3",
+            self.root / "test.sqlite3",
             MeasurementCipher(b"t" * 32),
             PasswordHasher(iterations=1_000),
         )
@@ -137,6 +137,21 @@ class BotGatewayTests(unittest.TestCase):
             "SELECT user_id FROM User WHERE login = ?", ("student",)
         ).fetchone()[0]
         self.assertIsNone(self.repository.active_channel_for_user(user_id))
+
+    def test_bot_token_is_loaded_from_secret_file(self) -> None:
+        token_file = self.root / "bot_token"
+        token_file.write_text("  example-token\n", encoding="utf-8")
+        self.assertEqual(load_bot_token(token_file), "example-token")
+
+    def test_missing_bot_token_file_is_rejected(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Файл токена не найден"):
+            load_bot_token(self.root / "missing-token")
+
+    def test_empty_bot_token_file_is_rejected(self) -> None:
+        token_file = self.root / "empty-token"
+        token_file.write_text("\n", encoding="utf-8")
+        with self.assertRaisesRegex(SystemExit, "Файл токена пуст"):
+            load_bot_token(token_file)
 
 
 if __name__ == "__main__":

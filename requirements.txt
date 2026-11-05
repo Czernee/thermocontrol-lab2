@@ -1,1 +1,2 @@
 cryptography>=43,<50
+tzdata>=2025.2,<2027

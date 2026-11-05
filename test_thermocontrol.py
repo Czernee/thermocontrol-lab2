@@ -12,6 +12,8 @@ from thermocontrol import (
     SignalProcessor,
     TemperatureSource,
     ThermoControl,
+    format_user_time,
+    utc_text,
 )
 
 
@@ -61,6 +63,49 @@ class ThermoControlTests(unittest.TestCase):
         self.assertIn("22.00", self.application.handle_command(channel, "/status"))
         self.assertIn("Сеанс завершен", self.application.handle_command(channel, "/logout"))
         self.assertIn("Требуется вход", self.application.handle_command(channel, "/status"))
+
+    def test_status_uses_readable_moscow_time(self) -> None:
+        channel = "channel-time"
+        self.application.login(channel, "student", "Strong-pass-2")
+        moment = datetime(2026, 11, 5, 14, 10, 24, tzinfo=timezone.utc)
+        self.application.acquire_at(3, moment)
+
+        response = self.application.handle_command(channel, "/status")
+
+        self.assertIn("Температура: 22.60 °C", response)
+        self.assertIn("05.11.2026 17:10:24 МСК", response)
+        self.assertNotIn("T14:10:24Z", response)
+
+    def test_password_reset_revokes_sessions(self) -> None:
+        channel = "channel-reset"
+        self.assertIn(
+            "Вход выполнен",
+            self.application.login(channel, "student", "Strong-pass-2"),
+        )
+
+        self.assertTrue(self.repository.set_password("student", "New-strong-pass-3"))
+
+        self.assertIsNone(self.repository.authenticated_user(channel))
+        self.assertIn(
+            "Неверные",
+            self.application.login(channel, "student", "Strong-pass-2"),
+        )
+        self.assertIn(
+            "Вход выполнен",
+            self.application.login(channel, "student", "New-strong-pass-3"),
+        )
+
+    def test_history_uses_readable_user_time(self) -> None:
+        channel = "channel-history"
+        self.application.login(channel, "student", "Strong-pass-2")
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        self.application.acquire_at(0, moment)
+
+        response = self.application.handle_command(channel, "/history 1")
+        expected = format_user_time(utc_text(moment), "Europe/Moscow")
+
+        self.assertIn(expected, response)
+        self.assertNotIn("T", response)
 
     def test_authorization_is_separate_from_authentication(self) -> None:
         channel = "channel-2"

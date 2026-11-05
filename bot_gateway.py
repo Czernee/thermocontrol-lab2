@@ -6,7 +6,6 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 import time
 from typing import Any, Callable
@@ -31,23 +30,17 @@ class BotApiError(RuntimeError):
     """A sanitized Bot API error that never contains the access token."""
 
 
-def load_env(path: str | Path = ".env") -> None:
-    """Loads simple KEY=VALUE pairs without overwriting existing variables."""
+def load_bot_token(path: str | Path) -> str:
+    """Reads the API token from a local file or a mounted Docker secret."""
 
-    env_path = Path(path)
-    if not env_path.exists():
-        return
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
+    token_path = Path(path)
+    try:
+        token = token_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise SystemExit(f"Файл токена не найден: {token_path}") from None
+    if not token:
+        raise SystemExit(f"Файл токена пуст: {token_path}")
+    return token
 
 
 class BotApiClient:
@@ -59,7 +52,7 @@ class BotApiClient:
         opener: Callable[..., Any] = urlopen,
     ) -> None:
         if not token:
-            raise ValueError("BOT_TOKEN is empty")
+            raise ValueError("Bot API token is empty")
         self._base_url = f"https://api.telegram.org/bot{token}/"
         self._opener = opener
 
@@ -162,6 +155,7 @@ class BotGateway:
         self._pending_logins: dict[str, PendingLogin] = {}
 
     def handle_update(self, update: dict[str, Any]) -> None:
+        # Шлюз принимает только обычные текстовые сообщения пользователя.
         message = update.get("message")
         if not isinstance(message, dict):
             return
@@ -178,16 +172,20 @@ class BotGateway:
             return
 
         chat_id = int(chat["id"])
+        # Пароль разрешено передавать только в личном диалоге.
         if chat.get("type") != "private":
             self.api.send_message(chat_id, "Для входа используйте личный чат с ботом.")
             return
 
+        # Внутри ядра используется нейтральный идентификатор канала,
+        # поэтому оно не зависит от конкретного мессенджера.
         channel_user_id = f"msg:{int(sender['id'])}"
         raw_text = text
         command_text = self._normalize_command(raw_text)
         command = command_text.split(maxsplit=1)[0].lower() if command_text else ""
         pending = self._pending_logins.get(channel_user_id)
 
+        # Незавершенный вход хранится в памяти не более 120 секунд.
         if pending is not None and self.clock() > pending.expires_at:
             del self._pending_logins[channel_user_id]
             pending = None
@@ -199,6 +197,7 @@ class BotGateway:
                 return
 
         if pending is not None and command != "/cancel":
+            # Сообщение удаляется до проверки, чтобы пароль не оставался в чате.
             password_deleted = self._delete_password_message(
                 chat_id, int(message["message_id"])
             )
@@ -208,6 +207,7 @@ class BotGateway:
                     channel_user_id, pending.login, password
                 )
             finally:
+                # Состояние и локальная ссылка на пароль очищаются при любом исходе.
                 password = ""
                 del self._pending_logins[channel_user_id]
             if not password_deleted:
@@ -215,12 +215,14 @@ class BotGateway:
             self.api.send_message(chat_id, response)
             return
 
+        # Пользователь может явно отменить незавершенную процедуру входа.
         if command == "/cancel":
             removed = self._pending_logins.pop(channel_user_id, None)
             response = "Ввод пароля отменен." if removed else "Нет незавершенного входа."
             self.api.send_message(chat_id, response)
             return
 
+        # /login только запоминает логин; пароль ожидается отдельным сообщением.
         if command == "/login":
             parts = command_text.split()
             if len(parts) != 2:
@@ -241,6 +243,7 @@ class BotGateway:
             )
             return
 
+        # Все остальные команды обрабатывает независимое от мессенджера ядро.
         response = self.application.handle_command(channel_user_id, command_text)
         self.api.send_message(chat_id, response)
 
@@ -280,18 +283,6 @@ class BotGateway:
         return command if len(parts) == 1 else f"{command} {parts[1]}"
 
 
-def bootstrap_user(repository: Repository) -> None:
-    login = os.environ.get("BOT_LOGIN", "").strip()
-    password = os.environ.get("BOT_PASSWORD", "")
-    if not login and not password:
-        return
-    if not login or not password:
-        raise RuntimeError("BOT_LOGIN and BOT_PASSWORD must be set together")
-    if not repository.user_exists(login):
-        repository.provision_user(login, password)
-    os.environ.pop("BOT_PASSWORD", None)
-
-
 def initialize_api(api: BotApiClient, attempts: int = 5) -> dict[str, Any]:
     delay = 1
     for attempt in range(1, attempts + 1):
@@ -313,6 +304,7 @@ def run_long_polling(
     application: ThermoControl,
 ) -> None:
     offset: int | None = None
+    # monotonic не зависит от перевода системных часов, UTC нужен для БД.
     start_monotonic = time.monotonic()
     start_utc = datetime.now(timezone.utc)
     next_sample = 0
@@ -320,16 +312,20 @@ def run_long_polling(
 
     while True:
         elapsed = int(time.monotonic() - start_monotonic)
+        # Если сетевой запрос занял больше секунды, создаются все пропущенные отсчеты.
         while next_sample <= elapsed:
             measured_at = start_utc + timedelta(seconds=next_sample)
             application.acquire_at(next_sample, measured_at)
+            # После каждого отсчета проверяются новые выходы за заданные границы.
             gateway.deliver_alerts(application.last_alerts)
             next_sample += 1
 
         try:
+            # Короткий long polling чередует прием сообщений с измерениями.
             updates = api.get_updates(offset=offset, timeout=1)
             retry_delay = 1
         except BotApiError as error:
+            # Временная ошибка сети не останавливает измерения и длинный опрос.
             print(f"Шлюз сообщений: {error}. Повтор через {retry_delay} с.")
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, 5)
@@ -344,20 +340,16 @@ def run_long_polling(
             except BotApiError as error:
                 print(f"Шлюз сообщений: {error}.")
             finally:
+                # Следующий запрос начинает чтение после уже обработанного update_id.
                 offset = update_id + 1
 
 
-def run_bot(db_path: Path, key_path: Path, env_path: Path = Path(".env")) -> None:
-    load_env(env_path)
-    token = os.environ.get("BOT_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("BOT_TOKEN is not configured in .env")
-
+def run_bot(db_path: Path, key_path: Path, token_path: Path) -> None:
+    token = load_bot_token(token_path)
     key = load_or_create_key(key_path)
     repository = Repository(db_path, MeasurementCipher(key))
     repository.initialize()
     try:
-        bootstrap_user(repository)
         application = ThermoControl(repository)
         api = BotApiClient(token)
         identity = initialize_api(api)
@@ -371,11 +363,15 @@ def run_bot(db_path: Path, key_path: Path, env_path: Path = Path(".env")) -> Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ТермоКонтроль: шлюз сообщений")
-    parser.add_argument("--db", type=Path, default=Path("thermocontrol.sqlite3"))
-    parser.add_argument("--key", type=Path, default=Path("thermocontrol.key"))
-    parser.add_argument("--env", type=Path, default=Path(".env"))
+    parser.add_argument("--db", type=Path, default=Path("data/thermocontrol.sqlite3"))
+    parser.add_argument("--key", type=Path, default=Path("data/thermocontrol.key"))
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        default=Path("secrets/bot_token.txt"),
+    )
     arguments = parser.parse_args()
-    run_bot(arguments.db, arguments.key, arguments.env)
+    run_bot(arguments.db, arguments.key, arguments.token_file)
 
 
 if __name__ == "__main__":

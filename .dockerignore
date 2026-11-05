@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+.env
+.env.local
+data
+secrets
+*.sqlite3
+*.key
+*.log
+*.docx
+*.pdf
+*.zip
+*.drawio

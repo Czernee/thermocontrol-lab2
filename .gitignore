@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 .env
 .env.local
+data/
+secrets/
 *.sqlite3
 *.key
 *.log

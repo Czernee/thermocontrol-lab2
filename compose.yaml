@@ -1,0 +1,23 @@
+services:
+  thermocontrol:
+    build: .
+    restart: unless-stopped
+    init: true
+    command:
+      - python
+      - main.py
+      - --bot
+      - --db
+      - /app/data/thermocontrol.sqlite3
+      - --key
+      - /app/data/thermocontrol.key
+      - --token-file
+      - /run/secrets/bot_token
+    volumes:
+      - ./data:/app/data
+    secrets:
+      - bot_token
+
+secrets:
+  bot_token:
+    file: ./secrets/bot_token.txt

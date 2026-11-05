@@ -18,6 +18,7 @@ import secrets
 import sqlite3
 import struct
 from typing import Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -32,6 +33,7 @@ PBKDF2_ITERATIONS = 600_000
 SESSION_TTL_HOURS = 24
 LOCK_AFTER_FAILURES = 5
 LOCK_MINUTES = 5
+DEFAULT_USER_TIMEZONE = "Europe/Moscow"
 
 
 def utc_now() -> datetime:
@@ -46,6 +48,22 @@ def utc_text(value: datetime) -> str:
 
 def parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def format_user_time(
+    value: str,
+    timezone_name: str = DEFAULT_USER_TIMEZONE,
+) -> str:
+    """Преобразует внутреннюю UTC-метку в понятное локальное время пользователя."""
+
+    try:
+        user_zone = ZoneInfo(timezone_name)
+        label = "МСК" if timezone_name == DEFAULT_USER_TIMEZONE else timezone_name
+    except ZoneInfoNotFoundError:
+        user_zone = timezone.utc
+        label = "UTC"
+    local_value = parse_utc(value).astimezone(user_zone)
+    return f"{local_value:%d.%m.%Y %H:%M:%S} {label}"
 
 
 @dataclass(frozen=True)
@@ -66,20 +84,23 @@ class AlertEvent:
 
 
 class TemperatureSource:
-    """Deterministic virtual temperature sensor."""
+    """Детерминированная математическая модель виртуального датчика."""
 
     @staticmethod
     def value_at(t_seconds: float) -> float:
+        # Медленная синусоида изображает суточноподобное изменение температуры,
+        # а быстрая добавляет небольшие кратковременные колебания датчика.
         value = (
             22.0
             + 2.0 * math.sin(2.0 * math.pi * t_seconds / 120.0)
             + 0.3 * math.sin(2.0 * math.pi * t_seconds / 10.0)
         )
+        # Округление до 0,1 °C моделирует конечную точность реального датчика.
         return round(value / QUANTIZATION_STEP_C) * QUANTIZATION_STEP_C
 
 
 class SignalProcessor:
-    """Validates samples, stores a 300-item buffer and averages the last five."""
+    """Проверяет отсчеты, ведет буфер и усредняет пять последних значений."""
 
     def __init__(
         self,
@@ -96,6 +117,7 @@ class SignalProcessor:
         return len(self._samples)
 
     def accept(self, value_c: float, measured_at_utc: datetime) -> ProcessedSample | None:
+        # Недопустимый отсчет отбрасывается до помещения в буфер.
         if not isinstance(value_c, (int, float)):
             return None
         value = float(value_c)
@@ -104,7 +126,9 @@ class SignalProcessor:
         if not MIN_TEMPERATURE_C <= value <= MAX_TEMPERATURE_C:
             return None
 
+        # deque автоматически удаляет самый старый элемент после заполнения буфера.
         self._samples.append(value)
+        # Среднее последних пяти отсчетов подавляет кратковременный шум.
         window = list(self._samples)[-self.average_window :]
         filtered = sum(window) / len(window)
         return ProcessedSample(
@@ -116,7 +140,7 @@ class SignalProcessor:
 
 
 class PasswordHasher:
-    """PBKDF2-HMAC-SHA-256 password hashing with a unique random salt."""
+    """Хеширование паролей PBKDF2-HMAC-SHA-256 со случайной солью."""
 
     def __init__(self, iterations: int = PBKDF2_ITERATIONS) -> None:
         if iterations < 1:
@@ -126,16 +150,19 @@ class PasswordHasher:
     def create(self, password: str) -> tuple[bytes, bytes, int]:
         if len(password) < 8:
             raise ValueError("Password must contain at least 8 characters")
+        # Уникальная случайная соль не позволяет сравнивать одинаковые пароли.
         salt = secrets.token_bytes(16)
         digest = self._derive(password, salt, self.iterations)
         return salt, digest, self.iterations
 
     def verify(self, password: str, salt: bytes, expected: bytes, iterations: int) -> bool:
         actual = self._derive(password, salt, iterations)
+        # compare_digest выполняет сравнение за постоянное время.
         return hmac.compare_digest(actual, expected)
 
     @staticmethod
     def _derive(password: str, salt: bytes, iterations: int) -> bytes:
+        # PBKDF2 многократно применяет HMAC-SHA-256 и замедляет перебор паролей.
         return hashlib.pbkdf2_hmac(
             "sha256", password.encode("utf-8"), salt, iterations, dklen=32
         )
@@ -168,6 +195,7 @@ def load_or_create_key(path: str | Path) -> bytes:
     """Loads a local key or creates it outside the database on first launch."""
 
     key_path = Path(path)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
     if key_path.exists():
         return key_path.read_bytes()
     key = AESGCM.generate_key(bit_length=256)
@@ -185,7 +213,9 @@ class Repository:
         cipher: MeasurementCipher,
         password_hasher: PasswordHasher | None = None,
     ) -> None:
-        self.db_path = str(db_path)
+        database_path = Path(db_path)
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.db_path = str(database_path)
         self.cipher = cipher
         self.password_hasher = password_hasher or PasswordHasher()
         self.connection = sqlite3.connect(self.db_path)
@@ -286,6 +316,36 @@ class Repository:
             "SELECT 1 FROM User WHERE login = ? LIMIT 1", (login,)
         ).fetchone()
         return row is not None
+
+    def set_password(self, login: str, password: str) -> bool:
+        """Меняет пароль, сохраняя в БД только новую соль и хеш."""
+
+        salt, digest, iterations = self.password_hasher.create(password)
+        revoked_at = utc_text(utc_now())
+        with self.connection:
+            row = self.connection.execute(
+                "SELECT user_id FROM User WHERE login = ?", (login,)
+            ).fetchone()
+            if row is None:
+                return False
+            user_id = int(row["user_id"])
+            self.connection.execute(
+                """
+                UPDATE User
+                SET password_salt = ?, password_hash = ?, password_iterations = ?,
+                    failed_attempts = 0, locked_until_utc = NULL
+                WHERE user_id = ?
+                """,
+                (salt, digest, iterations, user_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE AuthSession SET revoked_at_utc = ?
+                WHERE user_id = ? AND revoked_at_utc IS NULL
+                """,
+                (revoked_at, user_id),
+            )
+        return True
 
     def authenticate(
         self,
@@ -605,7 +665,8 @@ class ThermoControl:
             if latest is None:
                 return "Измерений пока нет."
             timestamp, value = latest
-            return f"Температура: {value:.2f} °C; время UTC: {timestamp}."
+            shown_time = format_user_time(timestamp, str(user["timezone"]))
+            return f"Температура: {value:.2f} °C; время: {shown_time}."
 
         if command == "/history":
             minutes = self._minutes(parts)
@@ -615,7 +676,10 @@ class ThermoControl:
             if not values:
                 return "За указанный интервал измерений нет."
             shown = values[-10:]
-            lines = [f"{timestamp}: {value:.2f} °C" for timestamp, value in shown]
+            lines = [
+                f"{format_user_time(timestamp, str(user['timezone']))}: {value:.2f} °C"
+                for timestamp, value in shown
+            ]
             return "Последние измерения:\n" + "\n".join(lines)
 
         if command == "/limits":
