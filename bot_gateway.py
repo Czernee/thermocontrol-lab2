@@ -182,7 +182,7 @@ class BotGateway:
             self.api.send_message(chat_id, "Для входа используйте личный чат с ботом.")
             return
 
-        channel_user_id = f"tg:{int(sender['id'])}"
+        channel_user_id = f"msg:{int(sender['id'])}"
         raw_text = text
         command_text = self._normalize_command(raw_text)
         command = command_text.split(maxsplit=1)[0].lower() if command_text else ""
@@ -247,7 +247,7 @@ class BotGateway:
     def deliver_alerts(self, events: list[AlertEvent]) -> None:
         for event in events:
             channel = self.repository.active_channel_for_user(event.user_id)
-            if channel is None or not channel.startswith("tg:"):
+            if channel is None or not channel.startswith("msg:"):
                 continue
             try:
                 chat_id = int(channel.split(":", 1)[1])
