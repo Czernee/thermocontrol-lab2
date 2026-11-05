@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import secrets
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -15,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from thermocontrol import (
     AlertEvent,
+    HistoryChart,
     MeasurementCipher,
     Repository,
     ThermoControl,
@@ -127,6 +129,48 @@ class BotApiClient:
             "sendMessage",
             {"chat_id": chat_id, "text": text[:MAX_MESSAGE_LENGTH]},
         )
+
+    def send_photo(self, chat_id: int, photo: bytes, caption: str) -> None:
+        """Отправляет PNG как multipart/form-data без временного файла."""
+
+        boundary = f"ThermoControl-{secrets.token_hex(12)}"
+        separator = f"--{boundary}\r\n".encode("ascii")
+        body = bytearray()
+        for name, value in (("chat_id", str(chat_id)), ("caption", caption[:1000])):
+            body.extend(separator)
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(
+                    "utf-8"
+                )
+            )
+            body.extend(value.encode("utf-8"))
+            body.extend(b"\r\n")
+        body.extend(separator)
+        body.extend(
+            b'Content-Disposition: form-data; name="photo"; '
+            b'filename="history.png"\r\n'
+        )
+        body.extend(b"Content-Type: image/png\r\n\r\n")
+        body.extend(photo)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode("ascii"))
+
+        request = Request(
+            self._base_url + "sendPhoto",
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=20) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            raise BotApiError(f"Bot API returned HTTP {error.code}") from None
+        except (URLError, TimeoutError, json.JSONDecodeError):
+            raise BotApiError("Bot API is temporarily unavailable") from None
+        if not result.get("ok"):
+            description = str(result.get("description", "request rejected"))
+            raise BotApiError(f"Bot API rejected the request: {description}")
 
     def delete_message(self, chat_id: int, message_id: int) -> None:
         self.call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
@@ -241,6 +285,15 @@ class BotGateway:
                 "Отправьте пароль отдельным сообщением в течение 120 секунд. "
                 "После проверки сообщение будет удалено.",
             )
+            return
+
+        # Ядро строит универсальный PNG, а шлюз отвечает только за его доставку.
+        if command == "/history":
+            result = self.application.history_chart(channel_user_id, command_text)
+            if isinstance(result, HistoryChart):
+                self.api.send_photo(chat_id, result.png, result.caption)
+            else:
+                self.api.send_message(chat_id, result)
             return
 
         # Все остальные команды обрабатывает независимое от мессенджера ядро.

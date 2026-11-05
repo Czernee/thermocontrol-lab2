@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from bot_gateway import BotApiError, BotGateway, load_bot_token
+from bot_gateway import BotApiClient, BotApiError, BotGateway, load_bot_token
 from thermocontrol import MeasurementCipher, PasswordHasher, Repository, ThermoControl
 
 
@@ -11,6 +11,7 @@ class FakeApi:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
         self.deleted: list[tuple[int, int]] = []
+        self.photos: list[tuple[int, bytes, str]] = []
         self.fail_delete = False
         self.fail_send = False
 
@@ -23,6 +24,9 @@ class FakeApi:
         if self.fail_delete:
             raise BotApiError("temporary failure")
         self.deleted.append((chat_id, message_id))
+
+    def send_photo(self, chat_id: int, photo: bytes, caption: str) -> None:
+        self.photos.append((chat_id, photo, caption))
 
 
 def update(
@@ -78,6 +82,50 @@ class BotGatewayTests(unittest.TestCase):
         self.assertIn("Вход выполнен", responses)
         self.assertIn("Температура", responses)
         self.assertNotIn("correct-pass", responses)
+
+    def test_history_is_sent_as_png_chart(self) -> None:
+        self.gateway.handle_update(update("/login student", 1))
+        self.gateway.handle_update(update("correct-pass", 2))
+        self.gateway.handle_update(update("/history 1440", 3))
+
+        self.assertEqual(len(self.api.photos), 1)
+        chat_id, image, caption = self.api.photos[0]
+        self.assertEqual(chat_id, 100)
+        self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn("Минимум", caption)
+
+    def test_history_error_is_sent_as_text_instead_of_photo(self) -> None:
+        self.gateway.handle_update(update("/history 1", 1))
+
+        self.assertEqual(self.api.photos, [])
+        self.assertIn("Требуется вход", self.api.sent[-1][1])
+
+    def test_bot_api_photo_uses_multipart_request(self) -> None:
+        captured = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self):
+                return b'{"ok": true, "result": {}}'
+
+        def opener(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        client = BotApiClient("example-token", opener=opener)
+        client.send_photo(100, b"\x89PNG-test", "Сводка")
+
+        request = captured["request"]
+        self.assertTrue(request.full_url.endswith("/sendPhoto"))
+        self.assertIn("multipart/form-data", request.headers["Content-type"])
+        self.assertIn(b'name="photo"', request.data)
+        self.assertIn(b"\x89PNG-test", request.data)
 
     def test_login_with_password_in_command_is_rejected(self) -> None:
         self.gateway.handle_update(update("/login student correct-pass", 1))

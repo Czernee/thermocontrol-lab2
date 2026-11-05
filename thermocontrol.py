@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+from io import BytesIO
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,9 @@ from typing import Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.dates import AutoDateLocator, DateFormatter
+from matplotlib.figure import Figure
 
 
 MIN_TEMPERATURE_C = -40.0
@@ -81,6 +85,14 @@ class AlertEvent:
     value_c: float
     lower_c: float
     upper_c: float
+
+
+@dataclass(frozen=True)
+class HistoryChart:
+    """Готовое изображение истории и короткая текстовая сводка к нему."""
+
+    png: bytes
+    caption: str
 
 
 class TemperatureSource:
@@ -632,6 +644,114 @@ class ThermoControl:
         if session is None:
             return "Неверные учетные данные или вход временно заблокирован."
         return "Вход выполнен. Защищенные команды доступны 24 часа."
+
+    def history_chart(self, channel_user_id: str, text: str) -> HistoryChart | str:
+        """Строит независимый от мессенджера PNG-график истории измерений."""
+
+        parts = text.strip().split()
+        if not parts or parts[0].lower() != "/history":
+            return "Неизвестная команда. Используйте /start."
+
+        user = self.repository.authenticated_user(channel_user_id)
+        if user is None:
+            return "Требуется вход: /login <логин>."
+        subscription = self.repository.authorized_subscription(
+            channel_user_id, self.sensor_id
+        )
+        if subscription is None:
+            return "Нет права доступа к выбранному датчику."
+
+        minutes = self._minutes(parts)
+        if minutes is None:
+            return "Интервал должен быть целым числом от 1 до 1440 минут."
+        values = self.repository.history(minutes, self.sensor_id)
+        if not values:
+            return "За указанный интервал измерений нет."
+
+        timezone_name = str(user["timezone"])
+        try:
+            user_zone = ZoneInfo(timezone_name)
+            timezone_label = (
+                "МСК" if timezone_name == DEFAULT_USER_TIMEZONE else timezone_name
+            )
+        except ZoneInfoNotFoundError:
+            user_zone = timezone.utc
+            timezone_label = "UTC"
+
+        # Для очень длинного интервала на рисунке достаточно не более 1000 точек.
+        # Статистика ниже при этом считается по всем исходным измерениям.
+        display_values = values
+        if len(values) > 1000:
+            step = math.ceil(len(values) / 1000)
+            display_values = values[::step]
+            if display_values[-1] != values[-1]:
+                display_values.append(values[-1])
+
+        moments = [
+            parse_utc(timestamp).astimezone(user_zone)
+            for timestamp, _ in display_values
+        ]
+        temperatures = [value for _, value in display_values]
+
+        figure = Figure(figsize=(8.0, 4.5), dpi=120, facecolor="white")
+        canvas = FigureCanvasAgg(figure)
+        axes = figure.subplots()
+        marker = "o" if len(display_values) <= 120 else None
+        axes.plot(
+            moments,
+            temperatures,
+            color="#2563eb",
+            linewidth=2.0,
+            marker=marker,
+            markersize=3.5,
+            label="Температура",
+        )
+        lower = float(subscription["lower_c"])
+        upper = float(subscription["upper_c"])
+        axes.axhline(
+            lower,
+            color="#d97706",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Нижняя граница {lower:.1f} °C",
+        )
+        axes.axhline(
+            upper,
+            color="#dc2626",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"Верхняя граница {upper:.1f} °C",
+        )
+        axes.set_title(f"История температуры за {minutes} мин.")
+        axes.set_xlabel(f"Время, {timezone_label}")
+        axes.set_ylabel("Температура, °C")
+        axes.grid(True, color="#d1d5db", linewidth=0.7, alpha=0.8)
+        axes.legend(loc="best", fontsize=8)
+        axes.margins(x=0.02, y=0.15)
+        if len(moments) == 1:
+            axes.set_xlim(
+                moments[0] - timedelta(seconds=30),
+                moments[0] + timedelta(seconds=30),
+            )
+        locator = AutoDateLocator(tz=user_zone, minticks=3, maxticks=8)
+        axes.xaxis.set_major_locator(locator)
+        axes.xaxis.set_major_formatter(DateFormatter("%H:%M:%S", tz=user_zone))
+        figure.autofmt_xdate(rotation=25, ha="right")
+        figure.tight_layout()
+
+        output = BytesIO()
+        canvas.print_png(output)
+        all_temperatures = [value for _, value in values]
+        average = sum(all_temperatures) / len(all_temperatures)
+        caption = (
+            f"История за {minutes} мин.: {len(values)} измерений. "
+            f"Минимум: {min(all_temperatures):.2f} °C; "
+            f"максимум: {max(all_temperatures):.2f} °C; "
+            f"среднее: {average:.2f} °C."
+        )
+        png = output.getvalue()
+        figure.clear()
+        return HistoryChart(png=png, caption=caption)
 
     def handle_command(self, channel_user_id: str, text: str) -> str:
         parts = text.strip().split()

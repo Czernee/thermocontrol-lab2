@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from thermocontrol import (
     MeasurementCipher,
+    HistoryChart,
     PasswordHasher,
     Repository,
     SignalProcessor,
@@ -106,6 +107,52 @@ class ThermoControlTests(unittest.TestCase):
 
         self.assertIn(expected, response)
         self.assertNotIn("T", response)
+
+    def test_history_chart_is_png_with_summary(self) -> None:
+        channel = "channel-chart"
+        self.application.login(channel, "student", "Strong-pass-2")
+        moment = datetime.now(timezone.utc).replace(microsecond=0)
+        for second in range(3):
+            self.application.acquire_at(second, moment + timedelta(seconds=second))
+
+        result = self.application.history_chart(channel, "/history 1")
+
+        self.assertIsInstance(result, HistoryChart)
+        assert isinstance(result, HistoryChart)
+        self.assertTrue(result.png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn("3 измерений", result.caption)
+        self.assertIn("Минимум", result.caption)
+        self.assertIn("максимум", result.caption)
+        self.assertIn("среднее", result.caption)
+
+    def test_history_chart_requires_login_and_sensor_permission(self) -> None:
+        channel = "channel-chart-access"
+        self.assertIn("Требуется вход", self.application.history_chart(channel, "/history 1"))
+
+        self.application.login(channel, "student", "Strong-pass-2")
+        with self.repository.connection:
+            self.repository.connection.execute(
+                "UPDATE Subscription SET enabled = 0 WHERE user_id = ?",
+                (self.user_id,),
+            )
+
+        self.assertIn(
+            "Нет права доступа",
+            self.application.history_chart(channel, "/history 1"),
+        )
+
+    def test_history_chart_reports_invalid_interval_and_empty_history(self) -> None:
+        channel = "channel-chart-errors"
+        self.application.login(channel, "student", "Strong-pass-2")
+
+        self.assertIn(
+            "от 1 до 1440",
+            self.application.history_chart(channel, "/history нет"),
+        )
+        self.assertIn(
+            "измерений нет",
+            self.application.history_chart(channel, "/history 1"),
+        )
 
     def test_authorization_is_separate_from_authentication(self) -> None:
         channel = "channel-2"
