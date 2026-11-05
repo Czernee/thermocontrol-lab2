@@ -281,6 +281,12 @@ class Repository:
             )
         return user_id
 
+    def user_exists(self, login: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM User WHERE login = ? LIMIT 1", (login,)
+        ).fetchone()
+        return row is not None
+
     def authenticate(
         self,
         login: str,
@@ -403,6 +409,25 @@ class Repository:
             (user["user_id"], sensor_id),
         ).fetchone()
 
+    def active_channel_for_user(
+        self, user_id: int, now: datetime | None = None
+    ) -> str | None:
+        moment = utc_text(now or utc_now())
+        row = self.connection.execute(
+            """
+            SELECT S.channel_user_id FROM AuthSession S
+            JOIN User U ON U.user_id = S.user_id
+            WHERE S.user_id = ?
+              AND S.revoked_at_utc IS NULL
+              AND S.expires_at_utc > ?
+              AND U.active = 1
+            ORDER BY S.created_at_utc DESC
+            LIMIT 1
+            """,
+            (user_id, moment),
+        ).fetchone()
+        return None if row is None else str(row["channel_user_id"])
+
     def save_measurement(
         self, sensor_id: int, measured_at_utc: datetime, value_c: float
     ) -> None:
@@ -413,6 +438,8 @@ class Repository:
                 """
                 INSERT INTO Measurement(sensor_id, measured_at_utc, value_enc)
                 VALUES(?, ?, ?)
+                ON CONFLICT(sensor_id, measured_at_utc)
+                DO UPDATE SET value_enc = excluded.value_enc
                 """,
                 (sensor_id, timestamp, encrypted),
             )

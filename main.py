@@ -103,6 +103,7 @@ def provision(db_path: Path, key_path: Path, login: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="ТермоКонтроль: учебная версия")
     parser.add_argument("--demo", action="store_true", help="запустить демонстрацию")
+    parser.add_argument("--bot", action="store_true", help="запустить шлюз сообщений")
     parser.add_argument("--create-user", metavar="LOGIN", help="создать учетную запись")
     parser.add_argument("--db", type=Path, default=Path("thermocontrol.sqlite3"))
     parser.add_argument("--key", type=Path, default=Path("thermocontrol.key"))
@@ -110,6 +111,10 @@ def main() -> None:
 
     if arguments.demo:
         run_demo()
+    elif arguments.bot:
+        from bot_gateway import run_bot
+
+        run_bot(arguments.db, arguments.key)
     elif arguments.create_user:
         provision(arguments.db, arguments.key, arguments.create_user)
     else:
