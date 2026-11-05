@@ -66,7 +66,7 @@ class AlertEvent:
 
 
 class TemperatureSource:
-    """Deterministic virtual temperature sensor from Laboratory work 1."""
+    """Deterministic virtual temperature sensor."""
 
     @staticmethod
     def value_at(t_seconds: float) -> float:

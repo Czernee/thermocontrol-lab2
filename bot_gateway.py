@@ -168,7 +168,11 @@ class BotGateway:
         text = message.get("text")
         sender = message.get("from")
         chat = message.get("chat")
-        if not isinstance(text, str) or not isinstance(sender, dict) or not isinstance(chat, dict):
+        if (
+            not isinstance(text, str)
+            or not isinstance(sender, dict)
+            or not isinstance(chat, dict)
+        ):
             return
         if sender.get("is_bot"):
             return
@@ -188,7 +192,10 @@ class BotGateway:
             del self._pending_logins[channel_user_id]
             pending = None
             if not command_text.startswith("/"):
-                self.api.send_message(chat_id, "Время ввода пароля истекло. Повторите /login <логин>.")
+                self.api.send_message(
+                    chat_id,
+                    "Время ввода пароля истекло. Повторите /login <логин>.",
+                )
                 return
 
         if pending is not None and command != "/cancel":
@@ -217,7 +224,11 @@ class BotGateway:
         if command == "/login":
             parts = command_text.split()
             if len(parts) != 2:
-                self.api.send_message(chat_id, "Формат: /login <логин>. Пароль отправляется следующим сообщением.")
+                self.api.send_message(
+                    chat_id,
+                    "Формат: /login <логин>. "
+                    "Пароль отправляется следующим сообщением.",
+                )
                 return
             self._pending_logins[channel_user_id] = PendingLogin(
                 login=parts[1],
