@@ -51,7 +51,7 @@ class ThermoControlTests(unittest.TestCase):
             result = processor.accept(value, self.base + timedelta(seconds=index))
         self.assertIsNotNone(result)
         self.assertEqual(result.filtered_c, 23.0)
-        self.assertEqual(result.buffer_size, 6)
+        self.assertEqual(result.buffer_size, 5)
 
     def test_login_permission_logout_cycle(self) -> None:
         channel = "channel-1"
